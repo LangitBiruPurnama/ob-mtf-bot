@@ -1,0 +1,35 @@
+name: Alert OB multi-timeframe
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ob-mtf
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - name: Scan dan kirim alert
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alert_ob_mtf.py github
+      - name: Simpan riwayat
+        run: |
+          git config user.name "ob-bot"
+          git config user.email "ob-bot@users.noreply.github.com"
+          git add ob_mtf_sudah_terkirim.json ob_mtf_cache_htf.json
+          git diff --cached --quiet || (git commit -m "update riwayat OB" && git pull --rebase -q && git push -q)
