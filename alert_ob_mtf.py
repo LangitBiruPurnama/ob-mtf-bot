@@ -14,8 +14,8 @@ TF BESAR (4 jam / 1 jam):
   OB       : candle berlawanan terakhir sebelum dorongan, zona dari low sampai high candle itu.
   Umur     : maksimal 100 candle TF besar. OB GUGUR kalau ada candle close menembus zonanya.
 TF KECIL (15 menit / 5 menit):
-  Dorongan : satu gerakan searah (tidak harus beruntun, maksimal 10 candle) yang menembus swing sebelumnya,
-             dan di dalamnya minimal ada satu candle body >= 1,5 x ATR searah (tanda volume bergerak).
+  Dorongan : satu gerakan searah (tidak harus beruntun, maksimal 15 candle) yang menembus swing sebelumnya,
+             dan "kuat": ada satu candle searah body >= 1,2 x ATR, ATAU jumlah body candle searah >= 2 x ATR.
   OB       : candle berlawanan terakhir sebelum gerakan itu mulai, zona low - high.
   Syarat   : OB kecil terbentuk SETELAH harga masuk zona OB besar, dan berada di dalam / menyentuh zona OB besar.
 ALERT      : saat harga RETEST OB kecil (pertama kali menyentuh sisi dekatnya sesudah dorongan selesai).
@@ -49,9 +49,10 @@ HTF_KUAT_ATR = 1.5         # TF besar: minimal satu candle sekian x ATR (jalur 3
 HTF_JALUR_SATU_CANDLE = True   # aktifkan jalur 2: satu candle besar yang menembus swing
 SWEEP_MUNDUR = 8           # info sapu likuiditas: dicari sekian candle ke belakang dari OB
 VERSI_CACHE = 2            # naikkan bila aturan deteksi berubah (cache lama dibuang)
-LTF_KUAT_ATR = 1.5         # TF kecil: minimal satu candle dorongan sekian x ATR
+LTF_KUAT_ATR = 1.2         # TF kecil: satu candle dorongan minimal sekian x ATR (tanda volume bergerak)
+LTF_TOTAL_ATR = 2.0        # TF kecil: ATAU jumlah body candle searah dalam gerakan minimal sekian x ATR
 UMUR_OB_BESAR = 100        # umur maksimal OB TF besar (dalam candle TF besar)
-LTF_MAKS_GERAKAN = 10      # TF kecil: panjang gerakan maksimal (candle)
+LTF_MAKS_GERAKAN = 15      # TF kecil: panjang gerakan maksimal (candle)
 SL_BUFFER_ATR = 0.5        # stop = ujung luar OB kecil -/+ sekian x ATR TF kecil
 RR = 1.5                   # target (informasi di alert)
 PIVOT = 3                  # swing = pivot 3 candle kiri dan kanan
@@ -63,7 +64,7 @@ RECENT_GITHUB = 8          # mode GitHub: retest dianggap baru bila dalam sekian
 CANDLE_BESAR = 300         # jumlah candle TF besar yang diambil
 CANDLE_KECIL = 1000        # jumlah candle TF kecil yang diambil
 DELAY_DETIK = 15           # tunggu sesudah candle tutup supaya data bursa lengkap
-INTERVAL_SCAN = 300        # scan tiap 5 menit
+INTERVAL_SCAN = 60         # scan tiap 60 detik (versi CMD)
 REFRESH_KOIN_JAM = 6
 SIMPAN_HARI = 14
 WORKERS = 5
@@ -367,11 +368,12 @@ def deteksi_ltf(rows, n_closed, step):
             ref = atr[s - 1]
             if not ref:
                 continue
-            kuat = 0.0
+            kuat, total = 0.0, 0.0
             for m in range(s, k + 1):
                 if (arah == 1 and C[m] > O[m]) or (arah == -1 and C[m] < O[m]):
                     kuat = max(kuat, abs(C[m] - O[m]) / ref)
-            if kuat < LTF_KUAT_ATR:
+                    total += abs(C[m] - O[m]) / ref
+            if kuat < LTF_KUAT_ATR and total < LTF_TOTAL_ATR:
                 continue
             j = None
             for jj in range(s, max(s - 1 - CARI_OB_MUNDUR, -1), -1):
@@ -719,9 +721,9 @@ def main():
     koin, kapan_koin = None, 0
     cache = Cache()
     log("Bot alert ORDER BLOCK multi-timeframe mulai. Jangan tutup jendela ini.")
-    kirim(token, chat_id, "✅ Bot alert ORDER BLOCK multi-timeframe aktif.\nPasangan: 4 jam → 15 menit, 1 jam → 5 menit (Gate.io perpetual), scan tiap 5 menit.\n"
+    kirim(token, chat_id, "✅ Bot alert ORDER BLOCK multi-timeframe aktif.\nPasangan: 4 jam → 15 menit, 1 jam → 5 menit (Gate.io perpetual), scan tiap 1 menit.\n"
                           "OB TF besar = dorongan (3 candle total ≥2,5 ATR, atau 1 candle ≥1,5 ATR) yang menembus swing. Harga masuk zona itu, lalu di TF kecil terbentuk dorongan "
-                          "(ada candle ≥1,5 ATR) + OB kecil di dalam zona besar. Alert bunyi saat harga RETEST OB kecil. "
+                          "(1 candle ≥1,2 ATR atau total ≥2 ATR) + OB kecil di dalam zona besar. Alert bunyi saat harga RETEST OB kecil. "
                           "Stop di ujung OB kecil ∓ 0,5 ATR, target RR 1,5.")
     mulai = True
     while True:
