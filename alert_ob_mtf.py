@@ -6,8 +6,11 @@ Hanya alert, tidak membuka posisi. Hanya candle yang sudah tertutup dipakai untu
 PASANGAN: 4 jam -> 15 menit,  1 jam -> 5 menit.
 
 TF BESAR (4 jam / 1 jam):
-  Dorongan : 3 candle beruntun searah (diukur dari BODY). Semuanya minimal 1 x ATR dan minimal satu 1,5 x ATR
-             (ATR14 dihitung SEBELUM dorongan). Dorongan harus menembus swing sebelumnya (BOS/CHoCH).
+  Dorongan : salah satu dari dua jalur (ATR14 dihitung SEBELUM dorongan, ukuran diukur dari BODY),
+             dan harus menembus swing sebelumnya (BOS):
+             JALUR 1 = 3 candle beruntun searah, total body >= 2,5 x ATR dan minimal satu candle >= 1,5 x ATR
+                       (candle lain tidak punya syarat ukuran).
+             JALUR 2 = SATU candle searah dengan body >= 1,5 x ATR yang close-nya menembus swing.
   OB       : candle berlawanan terakhir sebelum dorongan, zona dari low sampai high candle itu.
   Umur     : maksimal 100 candle TF besar. OB GUGUR kalau ada candle close menembus zonanya.
 TF KECIL (15 menit / 5 menit):
@@ -41,8 +44,11 @@ HTF_CACHE = os.path.join(BASE, "ob_mtf_cache_htf.json")
 # ====================== PENGATURAN (boleh diubah) ======================
 PASANGAN = [("4h", "15m"), ("1h", "5m")]   # (TF besar, TF kecil)
 ATR_LEN = 14
-HTF_MIN_ATR = 1.0          # TF besar: tiap candle dorongan minimal sekian x ATR
-HTF_KUAT_ATR = 1.5         # TF besar: minimal satu candle sekian x ATR
+HTF_TOTAL_ATR = 2.5        # TF besar, jalur 3 candle: jumlah body ketiga candle minimal sekian x ATR
+HTF_KUAT_ATR = 1.5         # TF besar: minimal satu candle sekian x ATR (jalur 3 candle) / candle tunggal (jalur 1 candle)
+HTF_JALUR_SATU_CANDLE = True   # aktifkan jalur 2: satu candle besar yang menembus swing
+SWEEP_MUNDUR = 8           # info sapu likuiditas: dicari sekian candle ke belakang dari OB
+VERSI_CACHE = 2            # naikkan bila aturan deteksi berubah (cache lama dibuang)
 LTF_KUAT_ATR = 1.5         # TF kecil: minimal satu candle dorongan sekian x ATR
 UMUR_OB_BESAR = 100        # umur maksimal OB TF besar (dalam candle TF besar)
 LTF_MAKS_GERAKAN = 10      # TF kecil: panjang gerakan maksimal (candle)
@@ -237,44 +243,63 @@ def deteksi_htf(rows, n_closed, step):
     ph, pl = pivots(H, L)
     obs, ada = [], set()
     for i in range(ATR_LEN + 4, n):
-        a, b, c = i - 2, i - 1, i
-        ref = atr[i - 3]
-        if not ref:
-            continue
         for arah in (1, -1):
+            kandidat = []          # (indeks awal dorongan, jalur, kelipatan ATR terbesar)
+            # JALUR 1: 3 candle beruntun searah, total body besar, tembus swing
+            a, b, c = i - 2, i - 1, i
+            ref3 = atr[i - 3]
             idx = (a, b, c)
-            if arah == 1 and not all(C[x] > O[x] for x in idx):
-                continue
-            if arah == -1 and not all(C[x] < O[x] for x in idx):
-                continue
-            body = [abs(C[x] - O[x]) for x in idx]
-            if min(body) < HTF_MIN_ATR * ref or max(body) < HTF_KUAT_ATR * ref:
-                continue
-            batas = (i - 3) - PIVOT
-            if arah == 1:
-                p = pivot_sebelum(ph, batas)
-                if p is None:
+            if ref3 and ((arah == 1 and all(C[x] > O[x] for x in idx)) or (arah == -1 and all(C[x] < O[x] for x in idx))):
+                body = [abs(C[x] - O[x]) for x in idx]
+                if sum(body) >= HTF_TOTAL_ATR * ref3 and max(body) >= HTF_KUAT_ATR * ref3:
+                    batas = (i - 3) - PIVOT
+                    if arah == 1:
+                        p = pivot_sebelum(ph, batas)
+                        if p is not None and C[i - 3] <= H[p] and max(C[x] for x in idx) > H[p]:
+                            kandidat.append((a, "3 candle", max(body) / ref3))
+                    else:
+                        p = pivot_sebelum(pl, batas)
+                        if p is not None and C[i - 3] >= L[p] and min(C[x] for x in idx) < L[p]:
+                            kandidat.append((a, "3 candle", max(body) / ref3))
+            # JALUR 2: satu candle besar yang close-nya menembus swing
+            if HTF_JALUR_SATU_CANDLE:
+                ref1 = atr[i - 1]
+                if ref1 and ((arah == 1 and C[i] > O[i]) or (arah == -1 and C[i] < O[i])):
+                    bd = abs(C[i] - O[i])
+                    if bd >= HTF_KUAT_ATR * ref1:
+                        batas = (i - 1) - PIVOT
+                        if arah == 1:
+                            p = pivot_sebelum(ph, batas)
+                            if p is not None and C[i] > H[p] and C[i - 1] <= H[p]:
+                                kandidat.append((i, "1 candle", bd / ref1))
+                        else:
+                            p = pivot_sebelum(pl, batas)
+                            if p is not None and C[i] < L[p] and C[i - 1] >= L[p]:
+                                kandidat.append((i, "1 candle", bd / ref1))
+            for awal, jalur, mult in kandidat:
+                j = None
+                for jj in range(awal - 1, max(awal - 1 - CARI_OB_MUNDUR, -1), -1):
+                    if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
+                        j = jj
+                        break
+                if j is None or (arah, j) in ada:
                     continue
-                S = H[p]
-                if not (C[i - 3] <= S and max(C[x] for x in idx) > S):
-                    continue
-            else:
-                p = pivot_sebelum(pl, batas)
-                if p is None:
-                    continue
-                S = L[p]
-                if not (C[i - 3] >= S and min(C[x] for x in idx) < S):
-                    continue
-            j = None
-            for jj in range(a - 1, max(a - 1 - CARI_OB_MUNDUR, -1), -1):
-                if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
-                    j = jj
-                    break
-            if j is None or (arah, j) in ada:
-                continue
-            ada.add((arah, j))
-            obs.append({"arah": arah, "i": i, "j": j, "lo": L[j], "hi": H[j], "t_j": T[j], "t_i": T[i],
-                        "form": T[i] + step, "mult": max(body) / ref})
+                ada.add((arah, j))
+                # info: sapu likuiditas tepat sebelum OB / dorongan
+                sweep = False
+                for x in range(max(j - SWEEP_MUNDUR, PIVOT + 1), awal):
+                    if arah == 1:
+                        pk = pivot_sebelum(pl, x - PIVOT)
+                        if pk is not None and L[x] < L[pk] and C[x] >= L[pk]:
+                            sweep = True
+                            break
+                    else:
+                        pk = pivot_sebelum(ph, x - PIVOT)
+                        if pk is not None and H[x] > H[pk] and C[x] <= H[pk]:
+                            sweep = True
+                            break
+                obs.append({"arah": arah, "i": i, "j": j, "lo": L[j], "hi": H[j], "t_j": T[j], "t_i": T[i],
+                            "form": T[i] + step, "mult": mult, "jalur": jalur, "sweep": sweep})
     return obs
 
 
@@ -414,7 +439,7 @@ def cari_sinyal_ltf(ob, rows, n_closed, kecil, htf_tf, ltf_tf, recent):
         tp = entry + RR * risk if bull else entry - RR * risk
         sinyal.append({"arah": "BUY" if bull else "SELL", "htf": htf_tf, "ltf": ltf_tf,
                        "big_lo": ob["lo"], "big_hi": ob["hi"], "big_t": ob["t_i"] + DETIK_TF[htf_tf],
-                       "big_mult": ob["mult"], "sm_lo": sm["lo"], "sm_hi": sm["hi"], "sm_t": sm["t_k"] + step_l,
+                       "big_mult": ob["mult"], "big_jalur": ob.get("jalur", "3 candle"), "big_sweep": bool(ob.get("sweep")), "sm_lo": sm["lo"], "sm_hi": sm["hi"], "sm_t": sm["t_k"] + step_l,
                        "sm_key": sm["t_j"], "mult": sm["mult"], "entry": entry, "sl": sl, "tp": tp,
                        "risk_pct": risk / entry * 100, "t_retest": rows[m_retest][0],
                        "umur": n_total - 1 - m_retest, "px": rows[-1][4]})
@@ -436,7 +461,9 @@ def pesan(label, s):
     jenis = "bullish" if buy else "bearish"
     out = [f"{ikon} {s['arah']} | ORDER BLOCK {s['htf']}→{s['ltf']} | {label}"]
     out.append(f"OB {s['htf']} {jenis}: {fmt(s['big_lo'])} - {fmt(s['big_hi'])} (dorongan selesai {jam_wib(s['big_t'])} WIB, "
-               f"candle terbesar {s['big_mult']:.1f} ATR). Harga sudah masuk zona ini.")
+               f"dorongan {s['big_jalur']}, candle terbesar {s['big_mult']:.1f} ATR). Harga sudah masuk zona ini.")
+    if s.get("big_sweep"):
+        out.append("Info: sebelum OB besar ada sapu likuiditas (wick menembus low/high lalu balik).")
     out.append(f"OB {s['ltf']} {jenis}: {fmt(s['sm_lo'])} - {fmt(s['sm_hi'])} (terbentuk {jam_wib(s['sm_t'])} WIB)")
     out.append(f"Volume bergerak: candle dorongan {s['ltf']} terbesar {s['mult']:.1f} ATR")
     out.append(f"RETEST OB {s['ltf']}: {jam_wib(s['t_retest'])} WIB ({s['umur']} candle lalu)")
@@ -606,7 +633,11 @@ def muat_cache_htf():
     c = Cache()
     try:
         d = json.load(open(HTF_CACHE, encoding="utf-8"))
+        if d.get("_v") != VERSI_CACHE:
+            return c
         for k, v in d.items():
+            if k == "_v":
+                continue
             kon, htf = k.split("|")
             c.htf[(kon, htf)] = v
     except Exception:
@@ -617,6 +648,7 @@ def muat_cache_htf():
 def simpan_cache_htf(c, koin):
     aktif = set(koin)
     d = {f"{k}|{h}": v for (k, h), v in c.htf.items() if k in aktif}
+    d["_v"] = VERSI_CACHE
     json.dump(d, open(HTF_CACHE, "w", encoding="utf-8"))
 
 
@@ -688,7 +720,7 @@ def main():
     cache = Cache()
     log("Bot alert ORDER BLOCK multi-timeframe mulai. Jangan tutup jendela ini.")
     kirim(token, chat_id, "✅ Bot alert ORDER BLOCK multi-timeframe aktif.\nPasangan: 4 jam → 15 menit, 1 jam → 5 menit (Gate.io perpetual), scan tiap 5 menit.\n"
-                          "OB TF besar = dorongan 3 candle (1-1,5 ATR) yang menembus swing. Harga masuk zona itu, lalu di TF kecil terbentuk dorongan "
+                          "OB TF besar = dorongan (3 candle total ≥2,5 ATR, atau 1 candle ≥1,5 ATR) yang menembus swing. Harga masuk zona itu, lalu di TF kecil terbentuk dorongan "
                           "(ada candle ≥1,5 ATR) + OB kecil di dalam zona besar. Alert bunyi saat harga RETEST OB kecil. "
                           "Stop di ujung OB kecil ∓ 0,5 ATR, target RR 1,5.")
     mulai = True
