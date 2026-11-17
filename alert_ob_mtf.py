@@ -11,7 +11,8 @@ TF BESAR (4 jam / 1 jam):
              JALUR 1 = 3 candle beruntun searah, total body >= 2,5 x ATR dan minimal satu candle >= 1,5 x ATR
                        (candle lain tidak punya syarat ukuran).
              JALUR 2 = SATU candle searah dengan body >= 1,5 x ATR yang close-nya menembus swing.
-  OB       : candle berlawanan terakhir sebelum dorongan, zona dari low sampai high candle itu.
+  OB       : gaya LuxAlgo: candle dengan low TERENDAH (BUY) / high TERTINGGI (SELL) pada leg dari swing yang ditembus sampai
+             sebelum dorongan; zona dari low sampai high candle itu. (OB_GAYA_LUXALGO = False: candle berlawanan terakhir sebelum dorongan)
   Umur     : maksimal 100 candle TF besar. OB GUGUR kalau ada candle close menembus zonanya.
 TF KECIL (15 menit / 5 menit):
   Dorongan : satu gerakan searah (tidak harus beruntun, maksimal 15 candle) yang menembus swing sebelumnya,
@@ -48,7 +49,10 @@ HTF_TOTAL_ATR = 2.5        # TF besar, jalur 3 candle: jumlah body ketiga candle
 HTF_KUAT_ATR = 1.5         # TF besar: minimal satu candle sekian x ATR (jalur 3 candle) / candle tunggal (jalur 1 candle)
 HTF_JALUR_SATU_CANDLE = True   # aktifkan jalur 2: satu candle besar yang menembus swing
 SWEEP_MUNDUR = 8           # info sapu likuiditas: dicari sekian candle ke belakang dari OB
-VERSI_CACHE = 2            # naikkan bila aturan deteksi berubah (cache lama dibuang)
+OB_GAYA_LUXALGO = True     # TF besar: OB = candle dengan low terendah (BUY) / high tertinggi (SELL) di leg sebelum dorongan (gaya LuxAlgo)
+                           # False = candle berlawanan terakhir sebelum dorongan (gaya lama)
+OB_LEG_MAKS = 60           # gaya LuxAlgo: leg dicari maksimal sekian candle ke belakang dari awal dorongan
+VERSI_CACHE = 3            # naikkan bila aturan deteksi berubah (cache lama dibuang)
 LTF_KUAT_ATR = 1.2         # TF kecil: satu candle dorongan minimal sekian x ATR (tanda volume bergerak)
 LTF_TOTAL_ATR = 2.0        # TF kecil: ATAU jumlah body candle searah dalam gerakan minimal sekian x ATR
 UMUR_OB_BESAR = 100        # umur maksimal OB TF besar (dalam candle TF besar)
@@ -245,7 +249,7 @@ def deteksi_htf(rows, n_closed, step):
     obs, ada = [], set()
     for i in range(ATR_LEN + 4, n):
         for arah in (1, -1):
-            kandidat = []          # (indeks awal dorongan, jalur, kelipatan ATR terbesar)
+            kandidat = []          # (indeks awal dorongan, jalur, kelipatan ATR terbesar, indeks pivot swing yang ditembus)
             # JALUR 1: 3 candle beruntun searah, total body besar, tembus swing
             a, b, c = i - 2, i - 1, i
             ref3 = atr[i - 3]
@@ -257,11 +261,11 @@ def deteksi_htf(rows, n_closed, step):
                     if arah == 1:
                         p = pivot_sebelum(ph, batas)
                         if p is not None and C[i - 3] <= H[p] and max(C[x] for x in idx) > H[p]:
-                            kandidat.append((a, "3 candle", max(body) / ref3))
+                            kandidat.append((a, "3 candle", max(body) / ref3, p))
                     else:
                         p = pivot_sebelum(pl, batas)
                         if p is not None and C[i - 3] >= L[p] and min(C[x] for x in idx) < L[p]:
-                            kandidat.append((a, "3 candle", max(body) / ref3))
+                            kandidat.append((a, "3 candle", max(body) / ref3, p))
             # JALUR 2: satu candle besar yang close-nya menembus swing
             if HTF_JALUR_SATU_CANDLE:
                 ref1 = atr[i - 1]
@@ -272,23 +276,29 @@ def deteksi_htf(rows, n_closed, step):
                         if arah == 1:
                             p = pivot_sebelum(ph, batas)
                             if p is not None and C[i] > H[p] and C[i - 1] <= H[p]:
-                                kandidat.append((i, "1 candle", bd / ref1))
+                                kandidat.append((i, "1 candle", bd / ref1, p))
                         else:
                             p = pivot_sebelum(pl, batas)
                             if p is not None and C[i] < L[p] and C[i - 1] >= L[p]:
-                                kandidat.append((i, "1 candle", bd / ref1))
-            for awal, jalur, mult in kandidat:
+                                kandidat.append((i, "1 candle", bd / ref1, p))
+            for awal, jalur, mult, piv in kandidat:
                 j = None
-                for jj in range(awal - 1, max(awal - 1 - CARI_OB_MUNDUR, -1), -1):
-                    if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
-                        j = jj
-                        break
+                if OB_GAYA_LUXALGO and piv < awal:
+                    # gaya LuxAlgo: candle dengan low terendah / high tertinggi pada leg sebelum dorongan
+                    rng = range(max(piv, awal - OB_LEG_MAKS), awal)
+                    j = min(rng, key=lambda x: L[x]) if arah == 1 else max(rng, key=lambda x: H[x])
+                else:
+                    for jj in range(awal - 1, max(awal - 1 - CARI_OB_MUNDUR, -1), -1):
+                        if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
+                            j = jj
+                            break
                 if j is None or (arah, j) in ada:
                     continue
                 ada.add((arah, j))
-                # info: sapu likuiditas tepat sebelum OB / dorongan
+                # info: sapu likuiditas di sekitar OB (gaya LuxAlgo: sampai candle OB; gaya lama: sampai awal dorongan)
                 sweep = False
-                for x in range(max(j - SWEEP_MUNDUR, PIVOT + 1), awal):
+                akhir = (j + 1) if OB_GAYA_LUXALGO else awal
+                for x in range(max(j - SWEEP_MUNDUR, PIVOT + 1), akhir):
                     if arah == 1:
                         pk = pivot_sebelum(pl, x - PIVOT)
                         if pk is not None and L[x] < L[pk] and C[x] >= L[pk]:
@@ -722,7 +732,7 @@ def main():
     cache = Cache()
     log("Bot alert ORDER BLOCK multi-timeframe mulai. Jangan tutup jendela ini.")
     kirim(token, chat_id, "✅ Bot alert ORDER BLOCK multi-timeframe aktif.\nPasangan: 4 jam → 15 menit, 1 jam → 5 menit (Gate.io perpetual), scan tiap 1 menit.\n"
-                          "OB TF besar = dorongan (3 candle total ≥2,5 ATR, atau 1 candle ≥1,5 ATR) yang menembus swing. Harga masuk zona itu, lalu di TF kecil terbentuk dorongan "
+                          "OB TF besar = candle terendah/tertinggi di leg sebelum dorongan (3 candle total ≥2,5 ATR, atau 1 candle ≥1,5 ATR) yang menembus swing. Harga masuk zona itu, lalu di TF kecil terbentuk dorongan "
                           "(1 candle ≥1,2 ATR atau total ≥2 ATR) + OB kecil di dalam zona besar. Alert bunyi saat harga RETEST OB kecil. "
                           "Stop di ujung OB kecil ∓ 0,5 ATR, target RR 1,5.")
     mulai = True
