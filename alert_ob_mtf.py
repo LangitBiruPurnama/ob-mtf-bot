@@ -55,7 +55,7 @@ LUX_PIVOT = 5             # panjang struktur internal LuxAlgo (default indikator
 LUX_TELAT = 3             # dorongan kuat boleh diikuti penembusan swing paling lambat sekian candle sesudahnya
 LUX_ATR_VOL = 200         # ATR untuk menandai candle volatil (default indikator = 200)
 OB_LEG_MAKS = 60           # gaya LuxAlgo: leg dicari maksimal sekian candle ke belakang dari awal dorongan
-VERSI_CACHE = 4            # naikkan bila aturan deteksi berubah (cache lama dibuang)
+VERSI_CACHE = 5            # naikkan bila aturan deteksi berubah (cache lama dibuang)
 LTF_KUAT_ATR = 1.2         # TF kecil: satu candle dorongan minimal sekian x ATR (tanda volume bergerak)
 LTF_TOTAL_ATR = 2.0        # TF kecil: ATAU jumlah body candle searah dalam gerakan minimal sekian x ATR
 UMUR_OB_BESAR = 100        # umur maksimal OB TF besar (dalam candle TF besar)
@@ -420,23 +420,37 @@ def deteksi_ltf(rows, n_closed, step):
     atr = atr_series(H, L, C)
     ph, pl = pivots(H, L)
     out, ada = [], set()
+    ev = {}
+    if OB_GAYA_LUXALGO:
+        ev = lux_event(O, H, L, C)
+        atr_v = atr_series(H, L, C, LUX_ATR_VOL)
+        pH, pL = [], []
+        for x in range(n):
+            vol = atr_v[x] and (H[x] - L[x]) >= 2 * atr_v[x]
+            pH.append(L[x] if vol else H[x])
+            pL.append(H[x] if vol else L[x])
     for k in range(ATR_LEN + 6, n):
         for arah in (1, -1):
-            batas = k - 1 - PIVOT
-            if arah == 1:
-                p = pivot_sebelum(ph, batas)
-                if p is None:
+            if OB_GAYA_LUXALGO:
+                if (k, arah) not in ev:
                     continue
-                S = H[p]
-                if not (C[k] > S and C[k - 1] <= S):
-                    continue
+                p = ev[(k, arah)]
             else:
-                p = pivot_sebelum(pl, batas)
-                if p is None:
-                    continue
-                S = L[p]
-                if not (C[k] < S and C[k - 1] >= S):
-                    continue
+                batas = k - 1 - PIVOT
+                if arah == 1:
+                    p = pivot_sebelum(ph, batas)
+                    if p is None:
+                        continue
+                    S = H[p]
+                    if not (C[k] > S and C[k - 1] <= S):
+                        continue
+                else:
+                    p = pivot_sebelum(pl, batas)
+                    if p is None:
+                        continue
+                    S = L[p]
+                    if not (C[k] < S and C[k - 1] >= S):
+                        continue
             awal = max(k - LTF_MAKS_GERAKAN + 1, p, 1)
             seg = range(awal, k + 1)
             s = min(seg, key=lambda x: L[x]) if arah == 1 else max(seg, key=lambda x: H[x])
@@ -451,14 +465,22 @@ def deteksi_ltf(rows, n_closed, step):
             if kuat < LTF_KUAT_ATR and total < LTF_TOTAL_ATR:
                 continue
             j = None
-            for jj in range(s, max(s - 1 - CARI_OB_MUNDUR, -1), -1):
-                if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
-                    j = jj
-                    break
+            if OB_GAYA_LUXALGO:
+                # persis LuxAlgo: candle dengan (parsed) low terendah / high tertinggi dari pivot yang ditembus sampai sebelum candle penembus
+                rng = range(p, k)
+                if len(rng) == 0:
+                    continue
+                j = min(rng, key=lambda x: pL[x]) if arah == 1 else max(rng, key=lambda x: pH[x])
+            else:
+                for jj in range(s, max(s - 1 - CARI_OB_MUNDUR, -1), -1):
+                    if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
+                        j = jj
+                        break
             if j is None or j >= k or (arah, j) in ada:
                 continue
             ada.add((arah, j))
-            out.append({"arah": arah, "k": k, "s": s, "j": j, "lo": L[j], "hi": H[j], "t_j": T[j],
+            lo_j, hi_j = (min(pL[j], pH[j]), max(pL[j], pH[j])) if OB_GAYA_LUXALGO else (L[j], H[j])
+            out.append({"arah": arah, "k": k, "s": s, "j": j, "lo": lo_j, "hi": hi_j, "t_j": T[j],
                         "t_k": T[k], "form": T[k] + step, "mult": kuat, "atr": atr[k] or ref})
     return out
 
@@ -516,7 +538,7 @@ def cari_sinyal_ltf(ob, rows, n_closed, kecil, htf_tf, ltf_tf, recent):
         tp = entry + RR * risk if bull else entry - RR * risk
         sinyal.append({"arah": "BUY" if bull else "SELL", "htf": htf_tf, "ltf": ltf_tf,
                        "big_lo": ob["lo"], "big_hi": ob["hi"], "big_t": ob["t_i"] + DETIK_TF[htf_tf],
-                       "big_mult": ob["mult"], "big_jalur": ob.get("jalur", "3 candle"), "big_sweep": bool(ob.get("sweep")), "sm_lo": sm["lo"], "sm_hi": sm["hi"], "sm_t": sm["t_k"] + step_l,
+                       "big_mult": ob["mult"], "big_jalur": ob.get("jalur", "3 candle"), "big_sweep": bool(ob.get("sweep")), "sm_lo": sm["lo"], "sm_hi": sm["hi"], "sm_t": sm["t_k"] + step_l, "sm_tj": sm["t_j"], "big_tj": ob.get("t_j"),
                        "sm_key": sm["t_j"], "mult": sm["mult"], "entry": entry, "sl": sl, "tp": tp,
                        "risk_pct": risk / entry * 100, "t_retest": rows[m_retest][0],
                        "umur": n_total - 1 - m_retest, "px": rows[-1][4]})
@@ -537,11 +559,11 @@ def pesan(label, s):
     ikon = "🟢" if buy else "🔴"
     jenis = "bullish" if buy else "bearish"
     out = [f"{ikon} {s['arah']} | ORDER BLOCK {s['htf']}→{s['ltf']} | {label}"]
-    out.append(f"OB {s['htf']} {jenis}: {fmt(s['big_lo'])} - {fmt(s['big_hi'])} (dorongan selesai {jam_wib(s['big_t'])} WIB, "
-               f"dorongan {s['big_jalur']}, candle terbesar {s['big_mult']:.1f} ATR). Harga sudah masuk zona ini.")
+    out.append(f"OB {s['htf']} {jenis}: {fmt(s['big_lo'])} - {fmt(s['big_hi'])} (candle OB {jam_wib(s.get('big_tj') or s['big_t'])} WIB, "
+               f"swing ditembus {jam_wib(s['big_t'])} WIB; dorongan {s['big_jalur']}, candle terbesar {s['big_mult']:.1f} ATR). Harga sudah masuk zona ini.")
     if s.get("big_sweep"):
         out.append("Info: sebelum OB besar ada sapu likuiditas (wick menembus low/high lalu balik).")
-    out.append(f"OB {s['ltf']} {jenis}: {fmt(s['sm_lo'])} - {fmt(s['sm_hi'])} (terbentuk {jam_wib(s['sm_t'])} WIB)")
+    out.append(f"OB {s['ltf']} {jenis}: {fmt(s['sm_lo'])} - {fmt(s['sm_hi'])} (candle OB {jam_wib(s['sm_tj'])} WIB, swing ditembus {jam_wib(s['sm_t'])} WIB)")
     out.append(f"Volume bergerak: candle dorongan {s['ltf']} terbesar {s['mult']:.1f} ATR")
     out.append(f"RETEST OB {s['ltf']}: {jam_wib(s['t_retest'])} WIB ({s['umur']} candle lalu)")
     out.append(f"Entry di zona: {fmt(s['entry'])}")
