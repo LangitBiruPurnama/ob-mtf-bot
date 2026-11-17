@@ -51,8 +51,11 @@ HTF_JALUR_SATU_CANDLE = True   # aktifkan jalur 2: satu candle besar yang menemb
 SWEEP_MUNDUR = 8           # info sapu likuiditas: dicari sekian candle ke belakang dari OB
 OB_GAYA_LUXALGO = True     # TF besar: OB = candle dengan low terendah (BUY) / high tertinggi (SELL) di leg sebelum dorongan (gaya LuxAlgo)
                            # False = candle berlawanan terakhir sebelum dorongan (gaya lama)
+LUX_PIVOT = 5             # panjang struktur internal LuxAlgo (default indikator = 5)
+LUX_TELAT = 3             # dorongan kuat boleh diikuti penembusan swing paling lambat sekian candle sesudahnya
+LUX_ATR_VOL = 200         # ATR untuk menandai candle volatil (default indikator = 200)
 OB_LEG_MAKS = 60           # gaya LuxAlgo: leg dicari maksimal sekian candle ke belakang dari awal dorongan
-VERSI_CACHE = 3            # naikkan bila aturan deteksi berubah (cache lama dibuang)
+VERSI_CACHE = 4            # naikkan bila aturan deteksi berubah (cache lama dibuang)
 LTF_KUAT_ATR = 1.2         # TF kecil: satu candle dorongan minimal sekian x ATR (tanda volume bergerak)
 LTF_TOTAL_ATR = 2.0        # TF kecil: ATAU jumlah body candle searah dalam gerakan minimal sekian x ATR
 UMUR_OB_BESAR = 100        # umur maksimal OB TF besar (dalam candle TF besar)
@@ -234,6 +237,43 @@ def pivot_sebelum(lst, batas):
 
 
 # ------------------------------------------------------------------ deteksi: TF BESAR
+def lux_event(O, H, L, C, size=LUX_PIVOT):
+    """Meniru indikator LuxAlgo Smart Money Concepts (struktur internal, size=5).
+    Pivot memakai logika 'leg' LuxAlgo; saat close menembus pivot (sekali per pivot) = BOS/CHoCH.
+    Hasil: {(indeks candle penembus, arah): indeks pivot yang ditembus}."""
+    n = len(C)
+    ev = {}
+    leg = 0
+    ph = pl = None                      # [level, indeks, crossed]
+    for t in range(size + 1, n):
+        a = t - size
+        win_h = max(H[a + 1:t + 1])
+        win_l = min(L[a + 1:t + 1])
+        leg_lama = leg
+        if H[a] > win_h:
+            leg = 0
+        elif L[a] < win_l:
+            leg = 1
+        lvl_h_lama = ph[0] if ph else None
+        lvl_l_lama = pl[0] if pl else None
+        if leg != leg_lama:
+            if leg == 0:
+                ph = [H[a], a, False]
+            else:
+                pl = [L[a], a, False]
+        if ph and not ph[2]:
+            ref = lvl_h_lama if lvl_h_lama is not None else ph[0]
+            if C[t] > ph[0] and C[t - 1] <= ref:
+                ev[(t, 1)] = ph[1]
+                ph[2] = True
+        if pl and not pl[2]:
+            ref = lvl_l_lama if lvl_l_lama is not None else pl[0]
+            if C[t] < pl[0] and C[t - 1] >= ref:
+                ev[(t, -1)] = pl[1]
+                pl[2] = True
+    return ev
+
+
 def deteksi_htf(rows, n_closed, step):
     """Dorongan 3 candle + OB pada TF besar (hanya candle tertutup)."""
     T = [c[0] for c in rows[:n_closed]]
@@ -247,6 +287,14 @@ def deteksi_htf(rows, n_closed, step):
     atr = atr_series(H, L, C)
     ph, pl = pivots(H, L)
     obs, ada = [], set()
+    ev = lux_event(O, H, L, C) if OB_GAYA_LUXALGO else {}
+    if OB_GAYA_LUXALGO:
+        atr_v = atr_series(H, L, C, LUX_ATR_VOL)
+        pH, pL = [], []                 # high/low 'parsed' LuxAlgo: candle volatil dibalik
+        for x in range(n):
+            vol = atr_v[x] and (H[x] - L[x]) >= 2 * atr_v[x]
+            pH.append(L[x] if vol else H[x])
+            pL.append(H[x] if vol else L[x])
     for i in range(ATR_LEN + 4, n):
         for arah in (1, -1):
             kandidat = []          # (indeks awal dorongan, jalur, kelipatan ATR terbesar, indeks pivot swing yang ditembus)
@@ -257,36 +305,51 @@ def deteksi_htf(rows, n_closed, step):
             if ref3 and ((arah == 1 and all(C[x] > O[x] for x in idx)) or (arah == -1 and all(C[x] < O[x] for x in idx))):
                 body = [abs(C[x] - O[x]) for x in idx]
                 if sum(body) >= HTF_TOTAL_ATR * ref3 and max(body) >= HTF_KUAT_ATR * ref3:
-                    batas = (i - 3) - PIVOT
-                    if arah == 1:
-                        p = pivot_sebelum(ph, batas)
-                        if p is not None and C[i - 3] <= H[p] and max(C[x] for x in idx) > H[p]:
-                            kandidat.append((a, "3 candle", max(body) / ref3, p))
+                    if OB_GAYA_LUXALGO:
+                        for x in range(a, min(i + LUX_TELAT, n - 1) + 1):
+                            if (x, arah) in ev:
+                                kandidat.append((a, "3 candle", max(body) / ref3, (ev[(x, arah)], x)))
+                                break
                     else:
-                        p = pivot_sebelum(pl, batas)
-                        if p is not None and C[i - 3] >= L[p] and min(C[x] for x in idx) < L[p]:
-                            kandidat.append((a, "3 candle", max(body) / ref3, p))
+                        batas = (i - 3) - PIVOT
+                        if arah == 1:
+                            p = pivot_sebelum(ph, batas)
+                            if p is not None and C[i - 3] <= H[p] and max(C[x] for x in idx) > H[p]:
+                                kandidat.append((a, "3 candle", max(body) / ref3, (p, i)))
+                        else:
+                            p = pivot_sebelum(pl, batas)
+                            if p is not None and C[i - 3] >= L[p] and min(C[x] for x in idx) < L[p]:
+                                kandidat.append((a, "3 candle", max(body) / ref3, (p, i)))
             # JALUR 2: satu candle besar yang close-nya menembus swing
             if HTF_JALUR_SATU_CANDLE:
                 ref1 = atr[i - 1]
                 if ref1 and ((arah == 1 and C[i] > O[i]) or (arah == -1 and C[i] < O[i])):
                     bd = abs(C[i] - O[i])
                     if bd >= HTF_KUAT_ATR * ref1:
-                        batas = (i - 1) - PIVOT
-                        if arah == 1:
-                            p = pivot_sebelum(ph, batas)
-                            if p is not None and C[i] > H[p] and C[i - 1] <= H[p]:
-                                kandidat.append((i, "1 candle", bd / ref1, p))
+                        if OB_GAYA_LUXALGO:
+                            for x in range(i, min(i + LUX_TELAT, n - 1) + 1):
+                                if (x, arah) in ev:
+                                    kandidat.append((i, "1 candle", bd / ref1, (ev[(x, arah)], x)))
+                                    break
                         else:
-                            p = pivot_sebelum(pl, batas)
-                            if p is not None and C[i] < L[p] and C[i - 1] >= L[p]:
-                                kandidat.append((i, "1 candle", bd / ref1, p))
-            for awal, jalur, mult, piv in kandidat:
+                            batas = (i - 1) - PIVOT
+                            if arah == 1:
+                                p = pivot_sebelum(ph, batas)
+                                if p is not None and C[i] > H[p] and C[i - 1] <= H[p]:
+                                    kandidat.append((i, "1 candle", bd / ref1, (p, i)))
+                            else:
+                                p = pivot_sebelum(pl, batas)
+                                if p is not None and C[i] < L[p] and C[i - 1] >= L[p]:
+                                    kandidat.append((i, "1 candle", bd / ref1, (p, i)))
+            for awal, jalur, mult, (piv, tembus) in kandidat:
                 j = None
-                if OB_GAYA_LUXALGO and piv < awal:
-                    # gaya LuxAlgo: candle dengan low terendah / high tertinggi pada leg sebelum dorongan
-                    rng = range(max(piv, awal - OB_LEG_MAKS), awal)
-                    j = min(rng, key=lambda x: L[x]) if arah == 1 else max(rng, key=lambda x: H[x])
+                if OB_GAYA_LUXALGO:
+                    # persis LuxAlgo: dari pivot yang ditembus sampai tepat sebelum candle penembus,
+                    # ambil candle dengan (parsed) low terendah / (parsed) high tertinggi (kemunculan pertama)
+                    rng = range(piv, tembus)
+                    if len(rng) == 0:
+                        continue
+                    j = min(rng, key=lambda x: pL[x]) if arah == 1 else max(rng, key=lambda x: pH[x])
                 else:
                     for jj in range(awal - 1, max(awal - 1 - CARI_OB_MUNDUR, -1), -1):
                         if (arah == 1 and C[jj] < O[jj]) or (arah == -1 and C[jj] > O[jj]):
@@ -309,8 +372,10 @@ def deteksi_htf(rows, n_closed, step):
                         if pk is not None and H[x] > H[pk] and C[x] <= H[pk]:
                             sweep = True
                             break
-                obs.append({"arah": arah, "i": i, "j": j, "lo": L[j], "hi": H[j], "t_j": T[j], "t_i": T[i],
-                            "form": T[i] + step, "mult": mult, "jalur": jalur, "sweep": sweep})
+                lo_j, hi_j = (min(pL[j], pH[j]), max(pL[j], pH[j])) if OB_GAYA_LUXALGO else (L[j], H[j])
+                ic = max(i, tembus)      # candle tempat OB 'resmi' terbentuk (penembusan swing)
+                obs.append({"arah": arah, "i": ic, "j": j, "lo": lo_j, "hi": hi_j, "t_j": T[j], "t_i": T[ic],
+                            "form": T[ic] + step, "mult": mult, "jalur": jalur, "sweep": sweep})
     return obs
 
 
